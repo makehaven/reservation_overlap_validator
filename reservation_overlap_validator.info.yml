@@ -1,0 +1,7 @@
+name: 'Reservation Overlap Validator'
+type: module
+description: 'Validates that reservations do not overlap for the same asset.'
+core_version_requirement: ^10
+package: Custom
+dependencies:
+  - drupal:node

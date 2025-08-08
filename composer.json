@@ -1,0 +1,6 @@
+{
+    "name": "makehaven/reservation_overlap_validator",
+    "type": "drupal-custom-module",
+    "description": "Validates that reservations do not overlap for the same asset.",
+    "license": "GPL-2.0-or-later"
+}

@@ -1,0 +1,163 @@
+<?php
+
+use Drupal\node\Entity\Node;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Datetime\DrupalDateTime;
+use Drupal\Core\Url;
+use Drupal\Core\Link;
+use Drupal\Core\Render\Markup;
+
+/**
+ * Implements hook_form_alter().
+ */
+function reservation_overlap_validator_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+  $target_form_ids = ['node_reservation_form', 'node_reservation_edit_form'];
+  if (in_array($form_id, $target_form_ids)) {
+    // Add custom validation handler.
+    $form['#validate'][] = 'reservation_overlap_validator_validate';
+  }
+}
+
+/**
+ * Custom validation handler for reservation conflicts.
+ */
+function reservation_overlap_validator_validate($form, FormStateInterface $form_state) {
+  /** @var \Drupal\node\Entity\Node $node */
+  $node = $form_state->getFormObject()->getEntity();
+
+  if ($node->bundle() === 'reservation') {
+    // Asset field handling.
+    $asset_field = $form_state->getValue('field_reservation_asset');
+    if (!is_array($asset_field) || empty($asset_field)) {
+      $form_state->setErrorByName('field_reservation_asset', 'Invalid data received for the asset field.');
+      return;
+    }
+    $asset_id = isset($asset_field[0]['target_id']) ? $asset_field[0]['target_id'] : ($asset_field['target_id'] ?? NULL);
+    if (empty($asset_id)) {
+      $form_state->setErrorByName('field_reservation_asset', 'The asset field is required.');
+      return;
+    }
+    $asset = Node::load($asset_id);
+    if (!$asset) {
+      $form_state->setErrorByName('field_reservation_asset', 'The selected asset could not be found.');
+      return;
+    }
+    $asset_label = $asset->label();
+
+    // Time range field handling.
+    $time_ranges = $form_state->getValue('field_reservation_time_range');
+    if (!is_array($time_ranges) || empty($time_ranges)) {
+      $form_state->setErrorByName('field_reservation_time_range', 'Invalid data received for the reservation time range field.');
+      return;
+    }
+    // Filter out non-array elements (like "add more" buttons).
+    $time_ranges_filtered = array_filter($time_ranges, function ($key) use ($time_ranges) {
+      return is_numeric($key) && is_array($time_ranges[$key]);
+    }, ARRAY_FILTER_USE_KEY);
+    if (empty($time_ranges_filtered)) {
+      $form_state->setErrorByName('field_reservation_time_range', 'No valid reservation time ranges provided.');
+      return;
+    }
+
+    // Process time ranges and check for internal conflicts.
+    $new_intervals = [];
+    foreach ($time_ranges_filtered as $new_time_range) {
+      if (isset($new_time_range['value'], $new_time_range['end_value'])) {
+        $start_time_object = $new_time_range['value'];
+        $end_time_object = $new_time_range['end_value'];
+      }
+      elseif (isset($new_time_range['time_wrapper']['value'], $new_time_range['time_wrapper']['end_value'])) {
+        $start_time_object = $new_time_range['time_wrapper']['value'];
+        $end_time_object = $new_time_range['time_wrapper']['end_value'];
+      }
+      else {
+        continue;
+      }
+      if (!$start_time_object instanceof DrupalDateTime || !$end_time_object instanceof DrupalDateTime) {
+        $form_state->setErrorByName('field_reservation_time_range', 'Invalid date format.');
+        return;
+      }
+      $start_time = $start_time_object->getTimestamp();
+      $end_time = $end_time_object->getTimestamp();
+
+      // Check for conflicts among new intervals.
+      foreach ($new_intervals as $interval) {
+        if (($start_time < $interval['end']) && ($end_time > $interval['start'])) {
+          $form_state->setErrorByName('field_reservation_time_range', 'Conflicting time ranges within the same reservation.');
+          return;
+        }
+      }
+      $new_intervals[] = ['start' => $start_time, 'end' => $end_time];
+    }
+    if (empty($new_intervals)) {
+      $form_state->setErrorByName('field_reservation_time_range', 'No valid reservation time ranges provided.');
+      return;
+    }
+
+    // Query other reservations for the same asset.
+    $query = \Drupal::entityQuery('node')
+      ->condition('type', 'reservation')
+      ->condition('status', 1)
+      ->condition('field_reservation_asset', $asset_id);
+    if (!$node->isNew()) {
+      $query->condition('nid', $node->id(), '!=');
+    }
+    $query->accessCheck(FALSE);
+    $nids = $query->execute();
+
+    // Collect conflicts.
+    $conflicts = [];
+    if (!empty($nids)) {
+      $existing_reservations = Node::loadMultiple($nids);
+      foreach ($existing_reservations as $existing_reservation) {
+        if (!$existing_reservation->hasField('field_reservation_time_range') || $existing_reservation->get('field_reservation_time_range')->isEmpty()) {
+          continue;
+        }
+        $existing_time_ranges_field = $existing_reservation->get('field_reservation_time_range');
+        foreach ($existing_time_ranges_field as $existing_time_range_item) {
+          $existing_start_date = $existing_time_range_item->start_date;
+          $existing_end_date = $existing_time_range_item->end_date;
+          if (!$existing_start_date || !$existing_end_date) {
+            continue;
+          }
+          $existing_start_time = $existing_start_date->getTimestamp();
+          $existing_end_time = $existing_end_date->getTimestamp();
+          foreach ($new_intervals as $interval) {
+            if (($interval['start'] < $existing_end_time) && ($interval['end'] > $existing_start_time)) {
+              $date_formatter = \Drupal::service('date.formatter');
+              $site_timezone = \Drupal::config('system.date')->get('timezone')['default'];
+              $existing_start_date_formatted = $date_formatter->format($existing_start_time, 'custom', 'Y-m-d g:i A', $site_timezone);
+              $existing_end_date_formatted = $date_formatter->format($existing_end_time, 'custom', 'Y-m-d g:i A', $site_timezone);
+              $conflicting_author = $existing_reservation->getOwner()->getDisplayName();
+              $url = Url::fromRoute('entity.node.canonical', ['node' => $existing_reservation->id()], ['attributes' => ['target' => '_blank']]);
+              $link = Link::fromTextAndUrl(t('View conflicting reservation'), $url)->toString();
+
+              $conflict_message = t(
+                'Conflict detected: The asset "@asset" is already reserved from @start to @end by @author. @link',
+                [
+                  '@asset' => $asset_label,
+                  '@start' => $existing_start_date_formatted,
+                  '@end' => $existing_end_date_formatted,
+                  '@author' => $conflicting_author,
+                  '@link' => $link,
+                ],
+                ['html' => TRUE]
+              );
+
+              if ($existing_reservation->hasField('body') && !empty($existing_reservation->get('body')->value)) {
+                $conflict_message .= ' ' . t('Notes: @notes', ['@notes' => $existing_reservation->get('body')->value], ['html' => TRUE]);
+              }
+              $conflicts[] = $conflict_message;
+            }
+          }
+        }
+      }
+    }
+    // If any conflicts were found, attach all messages as one global error.
+    if (!empty($conflicts)) {
+      $all_conflicts = implode('<br/>', array_unique($conflicts));
+      // Wrap with Markup::create so HTML is rendered correctly.
+      $form_state->setError($form, Markup::create($all_conflicts));
+    }
+  }
+}
