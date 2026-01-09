@@ -2,6 +2,6 @@ name: 'Reservation Overlap Validator'
 type: module
 description: 'Validates that reservations do not overlap for the same asset.'
 core_version_requirement: ^10 || ^11
-package: Custom
+package: Makerspace
 dependencies:
   - drupal:node
