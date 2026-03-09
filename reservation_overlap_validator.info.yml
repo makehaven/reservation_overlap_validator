@@ -1,6 +1,6 @@
 name: 'Reservation Overlap Validator'
 type: module
-description: 'Validates that reservations do not overlap for the same asset.'
+description: '[DEPRECATED] Superseded by makerspace_reservations. Do not enable.'
 core_version_requirement: ^10 || ^11
 package: Makerspace
 dependencies:

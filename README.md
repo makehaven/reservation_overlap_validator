@@ -1,5 +1,9 @@
 # Reservation Overlap Validator
 
+## Status
+
+**Deprecated.** This module is superseded by `makerspace_reservations` and should not be enabled on this site.
+
 ## Description
 
 This Drupal 10 module validates that reservations for the same asset do not overlap in time. It provides a custom validation handler for reservation content types to prevent scheduling conflicts.
